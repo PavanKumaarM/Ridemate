@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../providers/trip_provider.dart';
 import '../widgets/create_trip_button.dart';
@@ -19,6 +20,12 @@ class DashboardScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text("Ride Companion"),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person),
+            onPressed: () => context.push('/profile'),
+          ),
+        ],
       ),
 
       body: Padding(

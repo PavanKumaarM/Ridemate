@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../services/live_tracking_redirector.dart';
 
 class HomeShell extends StatefulWidget {
   final Widget child;
@@ -41,13 +42,6 @@ class _HomeShellState extends State<HomeShell> {
 
   void _navigateToNotifications() {
     context.push('/notifications');
-  }
-
-  Future<void> _logout() async {
-    await Supabase.instance.client.auth.signOut();
-    if (mounted) {
-      context.go('/login');
-    }
   }
 
   @override
@@ -105,13 +99,13 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => context.push('/createTrip'),
           ),
           IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _logout,
-            tooltip: 'Logout',
+            icon: const Icon(Icons.person),
+            onPressed: () => context.push('/profile'),
+            tooltip: 'Profile',
           ),
         ],
       ),
-      body: widget.child,
+      body: LiveTrackingRedirector(child: widget.child),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: currentIndex,
         onTap: (index) {

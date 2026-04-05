@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:ridemate_app/data/models/notification_model.dart';
+import 'package:ridemate_app/data/models/trip_model.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -246,9 +247,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                                 ),
                               ],
                             ),
-                            onTap: () {
+                            onTap: () async {
                               if (!notification.isRead) {
-                                _markAsRead(notification.id);
+                                await _markAsRead(notification.id);
+                              }
+                              
+                              // Handle booking accepted - navigate to live tracking
+                              if (notification.type == 'booking_accepted') {
+                                final tripId = notification.data?['trip_id'] as String?;
+                                if (tripId != null) {
+                                  await _navigateToLiveTracking(context, tripId);
+                                }
                               }
                             },
                           ),
@@ -258,6 +267,32 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                   ),
                 ),
     );
+  }
+
+  Future<void> _navigateToLiveTracking(BuildContext context, String tripId) async {
+    try {
+      // Fetch the trip data
+      final response = await Supabase.instance.client
+          .from('trips')
+          .select()
+          .eq('id', tripId)
+          .single();
+
+      final trip = TripModel.fromJson(response);
+
+      if (context.mounted) {
+        context.push('/liveTracking', extra: {
+          'trip': trip,
+          'isHost': false, // Passenger view
+        });
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading trip: $e')),
+        );
+      }
+    }
   }
 
   String _formatTime(DateTime time) {

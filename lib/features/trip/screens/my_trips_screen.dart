@@ -80,6 +80,9 @@ class _MyTripsScreenState extends State<MyTripsScreen> {
 
   Future<void> _acceptBooking(BookingModel booking) async {
     try {
+      // Get trip data before removing from list
+      final trip = _myTrips.firstWhere((t) => t.id == booking.tripId);
+
       // Immediately remove the trip from local list for instant feedback
       setState(() {
         _myTrips.removeWhere((t) => t.id == booking.tripId);
@@ -92,10 +95,10 @@ class _MyTripsScreenState extends State<MyTripsScreen> {
           .update({'status': 'accepted'})
           .eq('id', booking.id);
 
-      // Mark trip as completed since booking is accepted
+      // Update trip status to 'in_progress' instead of 'completed'
       await Supabase.instance.client
           .from('trips')
-          .update({'status': 'completed'})
+          .update({'status': 'in_progress'})
           .eq('id', booking.tripId);
 
       // Send notification to booker
@@ -103,7 +106,7 @@ class _MyTripsScreenState extends State<MyTripsScreen> {
         'user_id': booking.bookerId,
         'type': 'booking_accepted',
         'title': 'Booking Accepted!',
-        'message': 'Your booking request has been accepted by the trip host.',
+        'message': 'Your booking request has been accepted. The trip is starting now!',
         'data': {
           'trip_id': booking.tripId,
           'booking_id': booking.id,
@@ -112,8 +115,14 @@ class _MyTripsScreenState extends State<MyTripsScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Booking accepted! Trip removed from active list.')),
+          const SnackBar(content: Text('Booking accepted! Starting live tracking...')),
         );
+
+        // Navigate to live tracking screen for host
+        context.push('/liveTracking', extra: {
+          'trip': trip,
+          'isHost': true,
+        });
       }
     } catch (e) {
       debugPrint('Error accepting booking: $e');

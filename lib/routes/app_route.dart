@@ -17,6 +17,7 @@ import 'package:ridemate_app/features/trip/screens/my_trips_screen.dart';
 import 'package:ridemate_app/features/trip/screens/available_trips_screen.dart';
 
 import 'package:ridemate_app/features/trip/screens/book_trip_screen.dart';
+import 'package:ridemate_app/features/trip/screens/live_tracking_screen.dart';
 import 'package:ridemate_app/features/notifications/screens/notifications_screen.dart';
 import '../features/trip/screens/create_trip_screen.dart';
 import '../features/trip/screens/trip_details_screen.dart';
@@ -26,17 +27,70 @@ import '../features/trip/screens/trip_history_screen.dart';
 import '../features/matching/screens/find_trip_screen.dart';
 
 import '../features/profile/screens/profile_screen.dart';
+import '../features/profile/screens/profile_setup_screen.dart';
+import '../features/profile/screens/verification_pending_screen.dart';
+import '../features/profile/screens/verification_rejected_screen.dart';
 
 class AppRouter {
 
-  static FutureOr<String?> redirect(BuildContext context, GoRouterState state) {
+  static Future<String?> redirect(BuildContext context, GoRouterState state) async {
     final user = Supabase.instance.client.auth.currentUser;
     final isAuthenticated = user != null;
-    final isAuthPage = state.uri.toString() == '/login' || state.uri.toString() == '/signup';
+    final path = state.uri.toString();
+    final isAuthPage = path == '/login' || path == '/signup';
+    final isProfileSetupPage = path == '/profileSetup';
+    final isVerificationPage = path == '/verificationPending';
+    final isRejectedPage = path == '/verificationRejected';
 
+    // Not authenticated - go to login
     if (!isAuthenticated && !isAuthPage) return '/login';
-    if (isAuthenticated && isAuthPage) return '/home';
+    
+    // Authenticated but on auth page - check profile and verification
+    if (isAuthenticated && isAuthPage) {
+      final userData = await _getUserData(user.id);
+      if (userData == null || userData['is_profile_complete'] != true) {
+        return '/profileSetup';
+      }
+      if (userData['status'] == 'rejected') {
+        return '/verificationRejected';
+      }
+      if (userData['status'] != 'verified') {
+        return '/verificationPending';
+      }
+      return '/home';
+    }
+
+    // Allow profile setup, pending and rejected pages
+    if (isAuthenticated && (isProfileSetupPage || isVerificationPage || isRejectedPage)) return null;
+
+    // Authenticated - check if allowed to access home
+    if (isAuthenticated) {
+      final userData = await _getUserData(user.id);
+      if (userData == null || userData['is_profile_complete'] != true) {
+        return '/profileSetup';
+      }
+      if (userData['status'] == 'rejected') {
+        return '/verificationRejected';
+      }
+      if (userData['status'] != 'verified') {
+        return '/verificationPending';
+      }
+    }
+
     return null;
+  }
+
+  static Future<Map<String, dynamic>?> _getUserData(String userId) async {
+    try {
+      final response = await Supabase.instance.client
+          .from('users')
+          .select('is_profile_complete, status')
+          .eq('id', userId)
+          .single();
+      return response;
+    } catch (e) {
+      return null;
+    }
   }
 
   static final GoRouter router = GoRouter(
@@ -115,6 +169,17 @@ class AppRouter {
       ),
 
       GoRoute(
+        path: "/liveTracking",
+        builder: (context, state) {
+          final args = state.extra as Map<String, dynamic>;
+          return LiveTrackingScreen(
+            trip: args['trip'] as TripModel,
+            isHost: args['isHost'] as bool,
+          );
+        },
+      ),
+
+      GoRoute(
         path: "/tripHistory",
         builder: (context, state) => const TripHistoryScreen(),
       ),
@@ -141,6 +206,18 @@ class AppRouter {
       GoRoute(
         path: "/profile",
         builder: (context, state) => const ProfileScreen(),
+      ),
+      GoRoute(
+        path: "/profileSetup",
+        builder: (context, state) => const ProfileSetupScreen(),
+      ),
+      GoRoute(
+        path: "/verificationPending",
+        builder: (context, state) => const VerificationPendingScreen(),
+      ),
+      GoRoute(
+        path: "/verificationRejected",
+        builder: (context, state) => const VerificationRejectedScreen(),
       ),
       GoRoute(
         path: "/login",

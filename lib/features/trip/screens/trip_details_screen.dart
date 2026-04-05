@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../data/models/trip_model.dart';
 
 class TripDetailsArgs {
@@ -63,36 +64,215 @@ class TripDetailsScreen extends StatelessWidget {
 
             const SizedBox(height: 16),
 
-            // ── ACTION BUTTON ─────────────────────────────────────────
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isCreator
-                      ? const Color(0xFFEF4444)
-                      : const Color(0xFF2563EB),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+            // ── ACTION BUTTONS ─────────────────────────────────────────
+            if (isCreator) ...[
+              // Host: Start Trip button (primary)
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2563EB),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
                   ),
-                  elevation: 0,
-                ),
-                onPressed: () {},
-                child: Text(
-                  isCreator ? 'Cancel Trip' : 'Request Ride',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.3,
+                  onPressed: () => _startTrip(context, trip),
+                  child: const Text(
+                    'Start Trip',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
                   ),
                 ),
               ),
-            ),
+              const SizedBox(height: 12),
+              // Host: Cancel Trip button (secondary)
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFEF4444),
+                    side: const BorderSide(color: Color(0xFFEF4444)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: () => _showCancelConfirmation(context, trip),
+                  child: const Text(
+                    'Cancel Trip',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ] else ...[
+              // Passenger: Request Ride button
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2563EB),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: () => _showRequestRide(context, trip),
+                  child: const Text(
+                    'Request Ride',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  // ── Cancel Trip ───────────────────────────────────────────────────────────
+  void _showCancelConfirmation(BuildContext context, TripModel trip) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancel Trip?'),
+        content: const Text(
+          'Are you sure you want to cancel this trip? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Keep Trip'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFEF4444),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              Navigator.pop(context);
+              await _cancelTrip(context, trip);
+            },
+            child: const Text('Cancel Trip'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _cancelTrip(BuildContext context, TripModel trip) async {
+    try {
+      await Supabase.instance.client
+          .from('trips')
+          .update({'status': 'cancelled'})
+          .eq('id', trip.id);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Trip cancelled successfully')),
+        );
+        context.pop(); // Go back to previous screen
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to cancel trip: $e')),
+        );
+      }
+    }
+  }
+
+  // ── Request Ride ──────────────────────────────────────────────────────────
+  void _showRequestRide(BuildContext context, TripModel trip) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Request Ride'),
+        content: Text(
+          'Request to join trip from ${trip.startAddress} to ${trip.destAddress}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _bookTrip(context, trip);
+            },
+            child: const Text('Send Request'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _bookTrip(BuildContext context, TripModel trip) async {
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please login to book a trip')),
+        );
+        return;
+      }
+
+      // Create booking record
+      await Supabase.instance.client.from('bookings').insert({
+        'trip_id': trip.id,
+        'passenger_id': user.id,
+        'status': 'confirmed',
+        'created_at': DateTime.now().toIso8601String(),
+      });
+
+      // Update trip available seats
+      await Supabase.instance.client
+          .from('trips')
+          .update({'available_seats': trip.availableSeats - 1})
+          .eq('id', trip.id);
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Booking confirmed! Starting live tracking...')),
+        );
+        
+        // Navigate to live tracking screen for passenger
+        context.push('/liveTracking', extra: {
+          'trip': trip,
+          'isHost': false,
+        });
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Booking failed: $e')),
+        );
+      }
+    }
+  }
+
+  // ── Start Trip (for host) ─────────────────────────────────────────────────
+  void _startTrip(BuildContext context, TripModel trip) {
+    context.push('/liveTracking', extra: {
+      'trip': trip,
+      'isHost': true,
+    });
   }
 }
 

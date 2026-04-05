@@ -9,6 +9,10 @@ class TripModel {
   final double destLat;
   final double destLng;
 
+  // Current location for live tracking
+  final double? currentLat;
+  final double? currentLng;
+
   final String startAddress;
   final String destAddress;
 
@@ -29,6 +33,8 @@ class TripModel {
     required this.startLng,
     required this.destLat,
     required this.destLng,
+    this.currentLat,
+    this.currentLng,
     required this.startAddress,
     required this.destAddress,
     required this.departureTime,
@@ -51,6 +57,9 @@ class TripModel {
 
       destLat: (json['dest_lat'] as num).toDouble(),
       destLng: (json['dest_lng'] as num).toDouble(),
+
+      currentLat: json['current_lat'] != null ? (json['current_lat'] as num).toDouble() : null,
+      currentLng: json['current_lng'] != null ? (json['current_lng'] as num).toDouble() : null,
 
       startAddress: json['start_address'],
       destAddress: json['dest_address'],
@@ -79,6 +88,10 @@ class TripModel {
 
       "dest_lat": destLat,
       "dest_lng": destLng,
+
+      // Only include current location if set (for updates, not inserts)
+      if (currentLat != null) "current_lat": currentLat,
+      if (currentLng != null) "current_lng": currentLng,
 
       "start_address": startAddress,
       "dest_address": destAddress,
