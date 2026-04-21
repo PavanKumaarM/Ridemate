@@ -6,19 +6,22 @@ import 'package:geolocator/geolocator.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../data/models/trip_model.dart';
 import '../../../core/services/live_location_service.dart';
+import '../../../core/services/email_otp_service.dart';
 
 /// Live tracking screen for both host (driver) and passenger.
 /// 
-/// Host Mode: Streams current location to Supabase
-/// Passenger Mode: Subscribes to host's location updates
+/// Host Mode: Streams current location to Supabase and shows passenger locations
+/// Passenger Mode: Subscribes to host's location updates and streams own location
 class LiveTrackingScreen extends StatefulWidget {
   final TripModel trip;
   final bool isHost; // true = driver/host, false = passenger
+  final String? bookingId; // For passenger to stream their location
 
   const LiveTrackingScreen({
     super.key,
     required this.trip,
     required this.isHost,
+    this.bookingId,
   });
 
   @override
@@ -32,17 +35,24 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
   // Location tracking
   ll.LatLng? _currentLocation;
   ll.LatLng? _driverLocation;
+  List<ll.LatLng> _passengerLocations = []; // For host to see passenger locations
   StreamSubscription<Map<String, dynamic>>? _tripSubscription;
   StreamSubscription<Position>? _hostPositionStream;
+  StreamSubscription<Position>? _passengerPositionStream;
+  StreamSubscription<List<Map<String, dynamic>>>? _passengerLocationsSubscription;
 
   // Route polyline points
   List<ll.LatLng> _routePoints = [];
+  List<ll.LatLng> _hostToPassengerRoute = []; // Route from host to passenger pickup
 
   // UI state
   bool _isLoading = true;
   String? _error;
   double? _distanceToDestination;
+  double? _distanceToPickup;
   int? _estimatedMinutes;
+  bool _showOtpButton = false;
+  bool _tripStarted = false;
 
   @override
   void initState() {
@@ -60,10 +70,10 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
       await _fetchRoute();
 
       if (widget.isHost) {
-        // Host mode: Start streaming location
+        // Host mode: Start streaming location and subscribe to passenger locations
         await _locationService.startLocationStreaming(widget.trip.id);
         
-        // Also listen to own position for UI updates
+        // Listen to own position for UI updates
         _hostPositionStream = Geolocator.getPositionStream(
           locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.high,
@@ -74,9 +84,27 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
             _currentLocation = ll.LatLng(position.latitude, position.longitude);
           });
           _mapController.move(_currentLocation!, _mapController.camera.zoom);
+          // Update route to passenger when host moves
+          _fetchHostToPassengerRoute();
+        });
+
+        // Subscribe to passenger locations
+        _passengerLocationsSubscription = _locationService
+            .subscribeToPassengerLocations(widget.trip.id)
+            .listen((passengers) {
+          setState(() {
+            _passengerLocations = passengers
+                .map((p) => ll.LatLng(
+                      (p['lat'] as num).toDouble(),
+                      (p['lng'] as num).toDouble(),
+                    ))
+                .toList();
+          });
+          // Update route from host to passenger when passenger locations change
+          _fetchHostToPassengerRoute();
         });
       } else {
-        // Passenger mode: Subscribe to driver's location
+        // Passenger mode: Subscribe to driver's location and track own position
         _tripSubscription = _locationService
             .subscribeToTripLocation(widget.trip.id)
             .listen((data) {
@@ -87,10 +115,31 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                 (data['lng'] as num).toDouble(),
               );
             });
-            // Center map on driver
             _mapController.move(_driverLocation!, _mapController.camera.zoom);
           }
         });
+
+        // Track passenger position for OTP verification and sharing with host
+        _passengerPositionStream = Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 10,
+          ),
+        ).listen((position) {
+          setState(() {
+            _currentLocation = ll.LatLng(position.latitude, position.longitude);
+            _checkDistanceToPickup();
+          });
+        });
+
+        // Stream passenger location to host (get bookingId from extra args)
+        final bookingId = widget.bookingId;
+        if (bookingId != null) {
+          _locationService.startPassengerLocationStreaming(bookingId);
+        }
+
+        // Start polling for trip status to detect when host verifies OTP
+        _startTripStatusPolling();
       }
 
       // Get initial position
@@ -146,15 +195,285 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
     }
   }
 
+  Future<void> _fetchHostToPassengerRoute() async {
+    if (_currentLocation == null || _passengerLocations.isEmpty) return;
+    
+    // Find nearest passenger
+    final nearestPassenger = _passengerLocations.first;
+    
+    try {
+      final url =
+          'https://router.project-osrm.org/route/v1/driving/'
+          '${_currentLocation!.longitude},${_currentLocation!.latitude};'
+          '${nearestPassenger.longitude},${nearestPassenger.latitude}'
+          '?overview=full&geometries=geojson';
+
+      final response = await Supabase.instance.client
+          .rpc('http_get', params: {'url': url})
+          .timeout(const Duration(seconds: 10));
+
+      final data = response as Map<String, dynamic>;
+      final routes = data['routes'] as List?;
+
+      if (routes != null && routes.isNotEmpty) {
+        final coords = routes[0]['geometry']['coordinates'] as List;
+        setState(() {
+          _hostToPassengerRoute = coords
+              .map((c) => ll.LatLng(
+                    (c[1] as num).toDouble(),
+                    (c[0] as num).toDouble(),
+                  ))
+              .toList();
+        });
+      }
+    } catch (e) {
+      // Fallback: straight line to passenger
+      setState(() {
+        _hostToPassengerRoute = [
+          _currentLocation!,
+          nearestPassenger,
+        ];
+      });
+    }
+  }
+
+  Future<void> _fetchRouteFromCurrentLocation() async {
+    if (_currentLocation == null) return;
+    
+    try {
+      final url =
+          'https://router.project-osrm.org/route/v1/driving/'
+          '${_currentLocation!.longitude},${_currentLocation!.latitude};'
+          '${widget.trip.destLng},${widget.trip.destLat}'
+          '?overview=full&geometries=geojson';
+
+      final response = await Supabase.instance.client
+          .rpc('http_get', params: {'url': url})
+          .timeout(const Duration(seconds: 10));
+
+      final data = response as Map<String, dynamic>;
+      final routes = data['routes'] as List?;
+
+      if (routes != null && routes.isNotEmpty) {
+        final coords = routes[0]['geometry']['coordinates'] as List;
+        setState(() {
+          _routePoints = coords
+              .map((c) => ll.LatLng(
+                    (c[1] as num).toDouble(),
+                    (c[0] as num).toDouble(),
+                  ))
+              .toList();
+          _distanceToDestination = (routes[0]['distance'] as num).toDouble() / 1000;
+          _estimatedMinutes = ((routes[0]['duration'] as num).toDouble() / 60).round();
+        });
+      }
+    } catch (e) {
+      // Fallback: straight line from current location to destination
+      setState(() {
+        _routePoints = [
+          _currentLocation!,
+          ll.LatLng(widget.trip.destLat, widget.trip.destLng),
+        ];
+      });
+    }
+  }
+
   @override
   void dispose() {
     _tripSubscription?.cancel();
     _hostPositionStream?.cancel();
+    _passengerPositionStream?.cancel();
+    _passengerLocationsSubscription?.cancel();
     if (widget.isHost) {
       _locationService.stopLocationStreaming();
     }
     _mapController.dispose();
     super.dispose();
+  }
+
+  void _checkDistanceToPickup() {
+    if (_currentLocation == null) return;
+    
+    final pickupLocation = ll.LatLng(widget.trip.startLat, widget.trip.startLng);
+    final distance = ll.Distance().distance(_currentLocation!, pickupLocation);
+    
+    setState(() {
+      _distanceToPickup = distance;
+      // Show OTP button when within 100 meters of pickup
+      _showOtpButton = distance <= 100 && !_tripStarted;
+    });
+  }
+
+  void _showOtpGenerationDialog() async {
+    setState(() => _isLoading = true);
+    
+    try {
+      // Get current user's email from Supabase
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user?.email == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please add an email to your profile to receive OTP')),
+        );
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // Generate OTP using free service
+      final otp = EmailOtpService.generateOtp();
+      
+      // Store OTP in database
+      final success = await EmailOtpService.storeOtpInTrip(
+        tripId: widget.trip.id,
+        otp: otp,
+      );
+      
+      setState(() => _isLoading = false);
+      
+      if (!success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to generate OTP. Please try again.')),
+        );
+        return;
+      }
+      
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.mark_email_read, color: Color(0xFF10B981)),
+                SizedBox(width: 8),
+                Text('OTP Sent to Email'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.email_outlined, size: 48, color: Color(0xFF10B981)),
+                const SizedBox(height: 16),
+                Text(
+                  'OTP sent to: ${user!.email}',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0FDF4),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Column(
+                    children: [
+                      Text(
+                        'Your OTP code has been sent to your email address.',
+                        style: TextStyle(fontSize: 13, color: Color(0xFF166534)),
+                        textAlign: TextAlign.center,
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'Share this code with your driver to start the trip.',
+                        style: TextStyle(fontSize: 12, color: Color(0xFF166534)),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF10B981).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF10B981), width: 2),
+                  ),
+                  child: Text(
+                    otp,
+                    style: const TextStyle(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF10B981),
+                      letterSpacing: 4,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'You can also share this code via WhatsApp or call',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  // Share via WhatsApp - TODO: Implement url_launcher
+                  Navigator.pop(context);
+                  _startTripStatusPolling();
+                },
+                child: const Text('Share via WhatsApp'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF10B981),
+                  foregroundColor: Colors.white,
+                ),
+                onPressed: () {
+                  Navigator.pop(context);
+                  _startTripStatusPolling();
+                },
+                child: const Text('Done'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to send OTP: $e')),
+        );
+      }
+    }
+  }
+
+  void _startTripStatusPolling() {
+    // Poll every 3 seconds to check if host verified OTP and started trip
+    Timer.periodic(const Duration(seconds: 3), (timer) async {
+      if (!mounted || _tripStarted) {
+        timer.cancel();
+        return;
+      }
+      
+      try {
+        final response = await Supabase.instance.client
+            .from('trips')
+            .select('status')
+            .eq('id', widget.trip.id)
+            .single();
+        
+        if (response['status'] == 'in_progress') {
+          setState(() => _tripStarted = true);
+          await _fetchRouteFromCurrentLocation();
+          timer.cancel();
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Trip started! Host has verified your OTP.'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        // Silently handle errors during polling
+      }
+    });
   }
 
   void _endTrip() {
@@ -238,7 +557,7 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                 userAgentPackageName: 'com.ridemate.app',
               ),
 
-              // Route polyline
+              // Route polyline (trip route)
               if (_routePoints.isNotEmpty)
                 PolylineLayer(
                   polylines: [
@@ -247,6 +566,20 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       strokeWidth: 4,
                       color: const Color(0xFF2563EB),
                       borderStrokeWidth: 1,
+                      borderColor: Colors.white,
+                    ),
+                  ],
+                ),
+
+              // Route from host to passenger (for host mode)
+              if (widget.isHost && _hostToPassengerRoute.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _hostToPassengerRoute,
+                      strokeWidth: 5,
+                      color: const Color(0xFF10B981), // Green route to passenger
+                      borderStrokeWidth: 2,
                       borderColor: Colors.white,
                     ),
                   ],
@@ -284,6 +617,22 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                       height: 50,
                       child: _buildLiveMarker(),
                     ),
+                  // Passenger location markers (for host)
+                  if (widget.isHost)
+                    ..._passengerLocations.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final location = entry.value;
+                      return Marker(
+                        point: location,
+                        width: 40,
+                        height: 50,
+                        child: _buildMarker(
+                          icon: Icons.person_pin,
+                          color: const Color(0xFF10B981),
+                          label: 'P${index + 1}',
+                        ),
+                      );
+                    }),
                 ],
               ),
             ],
@@ -490,37 +839,76 @@ class _LiveTrackingScreenState extends State<LiveTrackingScreen> {
                     const SizedBox(height: 16),
 
                     // Action button
-                    SizedBox(
-                      width: double.infinity,
-                      height: 52,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: widget.isHost
-                              ? const Color(0xFFEF4444)
-                              : const Color(0xFF2563EB),
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                    if (!widget.isHost && _showOtpButton && !_tripStarted)
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF10B981),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: 0,
                           ),
-                          elevation: 0,
+                          onPressed: _showOtpGenerationDialog,
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.verified_user),
+                              SizedBox(width: 8),
+                              Text(
+                                'Generate OTP for Host',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        onPressed: widget.isHost ? _endTrip : null,
-                        child: Text(
-                          widget.isHost ? 'End Trip' : 'Trip in Progress',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
+                      )
+                    else
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: widget.isHost
+                                ? const Color(0xFFEF4444)
+                                : _tripStarted
+                                    ? const Color(0xFF10B981)
+                                    : const Color(0xFF2563EB),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: 0,
+                          ),
+                          onPressed: widget.isHost ? _endTrip : null,
+                          child: Text(
+                            widget.isHost
+                                ? 'End Trip'
+                                : _tripStarted
+                                    ? 'Trip in Progress'
+                                    : 'Waiting for Host',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       ),
-                    ),
 
-                    if (!widget.isHost)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8),
+                    if (!widget.isHost && !_showOtpButton && !_tripStarted)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
                         child: Text(
-                          'Wait for the host to end the trip',
-                          style: TextStyle(
+                          _distanceToPickup != null
+                              ? 'Distance to pickup: ${(_distanceToPickup! / 1000).toStringAsFixed(2)} km'
+                              : 'Calculating distance...',
+                          style: const TextStyle(
                             fontSize: 12,
                             color: Color(0xFF6B7280),
                           ),

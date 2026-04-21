@@ -17,6 +17,7 @@ import 'package:ridemate_app/features/trip/screens/my_trips_screen.dart';
 import 'package:ridemate_app/features/trip/screens/available_trips_screen.dart';
 
 import 'package:ridemate_app/features/trip/screens/book_trip_screen.dart';
+import 'package:ridemate_app/features/trip/screens/booking_confirmation_screen.dart';
 import 'package:ridemate_app/features/trip/screens/live_tracking_screen.dart';
 import 'package:ridemate_app/features/notifications/screens/notifications_screen.dart';
 import '../features/trip/screens/create_trip_screen.dart';
@@ -159,6 +160,21 @@ class AppRouter {
       ),
 
       GoRoute(
+        path: "/bookingConfirmation",
+        builder: (context, state) {
+          final args = state.extra as Map<String, dynamic>;
+          return BookingConfirmationScreen(
+            trip: args['trip'] as TripModel,
+            bookingId: args['bookingId'] as String,
+            otp: args['otp'] as String,
+            hostName: args['hostName'] as String,
+            hostPhone: args['hostPhone'] as String,
+            vehicleNumber: args['vehicleNumber'] as String,
+          );
+        },
+      ),
+
+      GoRoute(
         path: "/notifications",
         builder: (context, state) => const NotificationsScreen(),
       ),
@@ -175,6 +191,7 @@ class AppRouter {
           return LiveTrackingScreen(
             trip: args['trip'] as TripModel,
             isHost: args['isHost'] as bool,
+            bookingId: args['bookingId'] as String?,
           );
         },
       ),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -24,80 +25,80 @@ class _BookTripScreenState extends State<BookTripScreen> {
         throw Exception('User not authenticated');
       }
 
-      // Ensure user exists in users table before creating booking
-      await Supabase.instance.client.from('users').upsert({
-        'id': currentUser.id,
-      });
+      // Generate OTP for this booking
+      final otp = (100000 + (DateTime.now().millisecondsSinceEpoch % 900000)).toString();
 
-      // Ensure host exists in users table (for notification foreign key)
-      await Supabase.instance.client.from('users').upsert({
-        'id': widget.trip.agentId,
-      });
-
-      // 1. Create booking record
+      // 1. Create booking record with OTP
       final bookingResponse = await Supabase.instance.client
           .from('bookings')
           .insert({
             'trip_id': widget.trip.id,
             'booker_id': currentUser.id,
             'host_id': widget.trip.agentId,
-            'status': 'pending',
+            'status': 'confirmed',
             'seats_booked': 1,
             'total_fare': widget.trip.basePrice,
+            'otp_code': otp,
           })
           .select()
           .single();
 
-      // 2. Create notification for the host
+      final bookingId = bookingResponse['id'] as String;
+
+      // 2. Update available seats
+      await Supabase.instance.client
+          .from('trips')
+          .update({'available_seats': widget.trip.availableSeats - 1})
+          .eq('id', widget.trip.id);
+
+      // 3. Send notification to host about new booking request
+      await Supabase.instance.client.from('notifications').insert({
+        'user_id': widget.trip.agentId,
+        'type': 'booking_request',
+        'title': 'New Booking Request!',
+        'message': 'A passenger has requested to book your trip. Tap to view details.',
+        'data': {
+          'trip_id': widget.trip.id,
+          'booking_id': bookingId,
+          'booker_id': currentUser.id,
+        },
+      });
+
+      // 4. Fetch host details (handle missing columns gracefully)
+      String hostName = 'Driver';
+      String hostPhone = '';
+      String vehicleNumber = 'N/A';
+      
       try {
-        await Supabase.instance.client.from('notifications').insert({
-          'user_id': widget.trip.agentId,
-          'type': 'booking_request',
-          'title': 'New Booking Request',
-          'message': 'Someone wants to book your trip from ${widget.trip.startAddress} to ${widget.trip.destAddress}',
-          'data': {
-            'trip_id': widget.trip.id,
-            'booking_id': bookingResponse['id'],
-            'booker_id': currentUser.id,
-          },
-        });
-      } catch (notificationError) {
-        // Log notification error but don't fail the booking
-        debugPrint('Failed to create notification: $notificationError');
+        final hostResponse = await Supabase.instance.client
+            .from('users')
+            .select('name, phone, vehicle_number')
+            .eq('id', widget.trip.agentId)
+            .maybeSingle();
+        
+        hostName = hostResponse?['name'] ?? 'Driver';
+        hostPhone = hostResponse?['phone'] ?? '';
+        vehicleNumber = hostResponse?['vehicle_number'] ?? 'N/A';
+      } catch (e) {
+        // Column might not exist, continue with defaults
+        debugPrint('Could not fetch host details: $e');
       }
 
       if (mounted) {
-        // Show success dialog
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => AlertDialog(
-            title: const Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 28),
-                SizedBox(width: 8),
-                Text('Request Sent!'),
-              ],
-            ),
-            content: const Text(
-              'Your booking request has been sent to the trip host. You will be notified when they accept your request.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  context.go('/home/availableTrips');
-                },
-                child: const Text('OK'),
-              ),
-            ],
-          ),
-        );
+        // Navigate to booking confirmation screen
+        context.push('/bookingConfirmation', extra: {
+          'trip': widget.trip,
+          'bookingId': bookingId,
+          'otp': otp,
+          'hostName': hostName,
+          'hostPhone': hostPhone,
+          'vehicleNumber': vehicleNumber,
+        });
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to book trip try again: $e')),
+          SnackBar(content: Text('Failed to book trip: $e')),
         );
       }
     } finally {

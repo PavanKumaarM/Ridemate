@@ -103,4 +103,51 @@ class LiveLocationService {
       desiredAccuracy: LocationAccuracy.high,
     );
   }
+
+  /// Stream passenger location to bookings table
+  /// Call this when passenger books a trip and is waiting for pickup
+  StreamSubscription<Position>? startPassengerLocationStreaming(String bookingId) {
+    return Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+      ),
+    ).listen((position) async {
+      try {
+        await Supabase.instance.client
+            .from('bookings')
+            .update({
+              'passenger_lat': position.latitude,
+              'passenger_lng': position.longitude,
+              'location_updated_at': DateTime.now().toIso8601String(),
+            })
+            .eq('id', bookingId);
+      } catch (e) {
+        print('Failed to update passenger location: $e');
+      }
+    });
+  }
+
+  /// Returns stream of passenger locations (for host)
+  Stream<List<Map<String, dynamic>>> subscribeToPassengerLocations(String tripId) {
+    return Supabase.instance.client
+        .from('bookings')
+        .stream(primaryKey: ['id'])
+        .map((bookings) {
+          return bookings
+              .where((b) =>
+                  b['trip_id'] == tripId &&
+                  b['status'] == 'confirmed' &&
+                  b['passenger_lat'] != null &&
+                  b['passenger_lng'] != null)
+              .map((b) => {
+                    'bookingId': b['id'],
+                    'passengerId': b['passenger_id'],
+                    'lat': b['passenger_lat'],
+                    'lng': b['passenger_lng'],
+                    'updatedAt': b['location_updated_at'],
+                  })
+              .toList();
+        });
+  }
 }
